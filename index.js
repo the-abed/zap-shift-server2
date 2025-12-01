@@ -78,6 +78,8 @@ async function run() {
     // Database collections
     const userCollection = db.collection("users");
     const parcelCollection = db.collection("parcels");
+    const paymentCollection = db.collection("payments");
+    const ridersCollection = db.collection("riders");
 
     // -------------------------------
     // 🔐 Verify Admin Middleware
@@ -256,7 +258,7 @@ async function run() {
           {
             $set: {
               paymentStatus: "paid",
-              
+              deliveryStatus: "pending-pickup",
               trackingId: trackingId,
             },
           }
@@ -284,7 +286,6 @@ async function run() {
           paymentInfo: paymentResult,
         });
       }
-
       res.send({ sessionId: false });
     });
 
