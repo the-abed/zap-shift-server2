@@ -1,3 +1,6 @@
+// -------------------------------
+// 📦 IMPORTS & INITIAL SETUP
+// -------------------------------
 const express = require("express");
 const cors = require("cors");
 const app = express();
@@ -7,27 +10,36 @@ const stripe = require("stripe")(process.env.STRIPE_SECRET);
 const port = process.env.PORT || 5000;
 const crypto = require("crypto");
 
+// Firebase Admin SDK for token verification
 const admin = require("firebase-admin");
-
 const serviceAccount = JSON.parse(process.env.FIREBASE_CREDENTIALS);
 
 admin.initializeApp({
   credential: admin.credential.cert(serviceAccount),
 });
 
+// -------------------------------
+// 🔐 Tracking ID Generator
+// -------------------------------
 function generateTrackingId() {
   const prefix = "TRK";
   const date = new Date().toISOString().slice(0, 10).replace(/-/g, "");
-  const random = crypto.randomBytes(3).toString("hex").toUpperCase(); // 6 chars
+  const random = crypto.randomBytes(3).toString("hex").toUpperCase();
   return `${prefix}-${date}-${random}`;
 }
 
 console.log(generateTrackingId());
 
-// Middleware
+// -------------------------------
+// 🌐 GLOBAL MIDDLEWARE
+// -------------------------------
 app.use(cors());
 app.use(express.json());
 
+// -------------------------------
+// 🔐 Verify Firebase Token Middleware
+// → Protects routes using Firebase Auth
+// -------------------------------
 const verifyFBToken = async (req, res, next) => {
   const token = req.headers.authorization;
   if (!token) {
@@ -42,11 +54,12 @@ const verifyFBToken = async (req, res, next) => {
     next();
   } catch (error) {
     return res.status(401).send({ error: "You are not authorized" });
-
-    next();
   }
 };
 
+// -------------------------------
+// 🏦 DATABASE CONNECTION (MongoDB)
+// -------------------------------
 const uri = `mongodb+srv://${process.env.DB_USER}:${process.env.DB_PASS}@simplecrudserver.fyfvvbn.mongodb.net/?appName=simpleCRUDserver`;
 
 const client = new MongoClient(uri, {
@@ -61,84 +74,107 @@ async function run() {
   try {
     await client.connect();
     const db = client.db("zapShiftDB");
+
+    // Database collections
     const userCollection = db.collection("users");
     const parcelCollection = db.collection("parcels");
-    const paymentCollection = db.collection("payments");
-    const ridersCollection = db.collection("riders");
 
-    // middle admin before allowing admin activity
-    // must be used after verifyFBToken middleware
+    // -------------------------------
+    // 🔐 Verify Admin Middleware
     const verifyAdmin = async (req, res, next) => {
       const email = req.decoded_email;
-      
+      // Implement admin check
+      const query = { email };
+      const user = await userCollection.findOne(query);
+
+      if (!user || user.role !== "admin") {
+        return res.status(403).send({ error: "You are not authorized" });
+      }
       next();
     };
 
-    // Users API
+    // -------------------------------
+    // 🧑 USERS API
+    // -------------------------------
+
+    // GET all users (Protected)
     app.get("/users", verifyFBToken, async (req, res) => {
-      const cursor = userCollection.find();
+       const searchText = req.query.search;
+      const query = {};
+
+      if(searchText) {
+        // query.displayName = { $regex: searchText, $options: "i" };
+        query.$or = [
+          { displayName: { $regex: searchText, $options: "i" } },
+          { email: { $regex: searchText, $options: "i" } },
+        ]
+      }
+      const cursor = userCollection.find(query).sort({ createdAt: -1 });
       const result = await cursor.toArray();
       res.send(result);
     });
-    // app.get("/users", async (req, res) => {
-    //   const query = {};
-    //   const options = { sort: { createdAt: -1 } };
-    //   const cursor = userCollection.find(query, options);
-    //   const result = await cursor.toArray();
-    //   res.send(result);
-    // });
 
+    // GET user role by email (Protected)
     app.get("/users/:email/role", verifyFBToken, async (req, res) => {
       const email = req.params.email;
-      const query = { email };
-      const user = await userCollection.findOne(query);
+      const user = await userCollection.findOne({ email });
       res.send({ role: user?.role || "user" });
     });
 
+    // Create a new user
     app.post("/users", async (req, res) => {
       const user = req.body;
       user.role = "user";
       user.createdAt = new Date();
+
       const userExist = await userCollection.findOne({ email: user.email });
       if (userExist) {
         return res.send({ message: "User already exist" });
       }
+
       const result = await userCollection.insertOne(user);
       res.send(result);
     });
 
-    app.patch("/users/:id", async (req, res) => {
-      const id = req.params.id;
-      const roleInfo = req.body;
-      const query = { _id: new ObjectId(id) };
-      const updatedDoc = {
-        $set: {
-          role: roleInfo.role,
-        },
-      };
-      const result = await userCollection.updateOne(query, updatedDoc);
-      res.send(result);
-    });
+    // Update user role (Admin only)
+    app.patch(
+      "/users/:id/role",
+      verifyFBToken,
+      verifyAdmin,
+      async (req, res) => {
+        const id = req.params.id;
+        const roleInfo = req.body;
 
-    // Parcels API
-    // Get all parcels
-    app.get("/parcels", async (req, res) => {
-      const query = {};
-      const { email } = req.query;
-      if (email) {
-        query.senderEmail = email;
+        const result = await userCollection.updateOne(
+          { _id: new ObjectId(id) },
+          { $set: { role: roleInfo.role } }
+        );
+
+        res.send(result);
       }
-      const options = { sort: { createdAt: -1 } };
-      const cursor = parcelCollection.find(query, options);
-      const result = await cursor.toArray();
-      res.send(result);
+    );
+
+    // -------------------------------
+    // 📦 PARCEL APIs
+    // -------------------------------
+
+    // Get all parcels / filter by sender email
+    app.get("/parcels", async (req, res) => {
+      const { email } = req.query;
+      const query = email ? { senderEmail: email } : {};
+
+      const parcels = await parcelCollection
+        .find(query, { sort: { createdAt: -1 } })
+        .toArray();
+
+      res.send(parcels);
     });
 
-    // Get single parcel
+    // Get parcel by ID
     app.get("/parcels/:id", async (req, res) => {
-      const id = req.params.id;
-      const query = { _id: new ObjectId(id) };
-      const result = await parcelCollection.findOne(query);
+      const result = await parcelCollection.findOne({
+        _id: new ObjectId(req.params.id),
+      });
       res.send(result);
     });
 
@@ -146,22 +182,28 @@ async function run() {
     app.post("/parcels", async (req, res) => {
       const parcel = req.body;
       parcel.createdAt = new Date();
+
       const result = await parcelCollection.insertOne(parcel);
       res.send(result);
     });
 
     // Delete parcel
     app.delete("/parcels/:id", async (req, res) => {
-      const id = req.params.id;
-      const query = { _id: new ObjectId(id) };
-      const result = await parcelCollection.deleteOne(query);
+      const result = await parcelCollection.deleteOne({
+        _id: new ObjectId(req.params.id),
+      });
       res.send(result);
     });
 
-    // Payment related apis
+    // -------------------------------
+    // 💳 PAYMENT APIs (Stripe)
+    // -------------------------------
+
+    // Create Stripe Checkout Session
     app.post("/payment-checkout-session", async (req, res) => {
       const paymentInfo = req.body;
       const amount = parseInt(paymentInfo.cost) * 100;
+
       const session = await stripe.checkout.sessions.create({
         line_items: [
           {
@@ -188,133 +230,127 @@ async function run() {
       res.send({ url: session.url });
     });
 
+    // After Stripe payment success → update parcel + save payment info
     app.patch("/payment-success", async (req, res) => {
       const sessionId = req.query.session_id;
-
       const session = await stripe.checkout.sessions.retrieve(sessionId);
-      // console.log(sessionId, session);
 
       const transactionId = session.payment_intent;
-      const query = { transactionId: transactionId };
 
-      const paymentExist = await paymentCollection.findOne(query);
+      // Prevent duplicate payment
+      const paymentExist = await paymentCollection.findOne({ transactionId });
       if (paymentExist) {
         return res.send({
           message: "Payment already exist",
-          transactionId: transactionId,
+          transactionId,
           trackingId: paymentExist.trackingId,
         });
       }
 
       const trackingId = generateTrackingId();
 
+      // Update parcel if paid
       if (session.payment_status === "paid") {
-        const id = session.metadata.parcelId;
+        await parcelCollection.updateOne(
+          { _id: new ObjectId(session.metadata.parcelId) },
+          {
+            $set: {
+              paymentStatus: "paid",
+              
+              trackingId: trackingId,
+            },
+          }
+        );
 
-        const query = { _id: new ObjectId(id) };
-        const update = {
-          $set: {
-            paymentStatus: "paid",
-            trackingId: trackingId,
-          },
-        };
-        const result = await parcelCollection.updateOne(query, update);
-
+        // Save payment to DB
         const payment = {
           amount: session.amount_total,
-          transactionId: session.payment_intent,
+          transactionId,
           parcelId: session.metadata.parcelId,
           parcelName: session.metadata.parcelName,
           senderEmail: session.customer_email,
           currency: session.currency,
           paymentStatus: session.payment_status,
           paidAt: new Date(),
-          trackingId: trackingId,
+          trackingId,
         };
-        if (session.payment_status === "paid") {
-          const paymentResult = await paymentCollection.insertOne(payment);
-          res.send({
-            success: true,
-            modifyParcel: result,
-            trackingId: trackingId,
-            transactionId: session.payment_intent,
-            paymentInfo: paymentResult,
-          });
-        }
+
+        const paymentResult = await paymentCollection.insertOne(payment);
+
+        return res.send({
+          success: true,
+          trackingId,
+          transactionId,
+          paymentInfo: paymentResult,
+        });
       }
 
       res.send({ sessionId: false });
     });
 
+    // Get payments (Protected + verifies user email)
     app.get("/payments", verifyFBToken, async (req, res) => {
-      // console.log('headers', req.headers);
       const email = req.query.email;
-      const query = {};
-      if (email) {
-        query.senderEmail = email;
 
-        // verify email address
-        if (email !== req.decoded_email) {
-          return res.status(401).send({ error: "You are not authorized" });
-        }
+      if (email && email !== req.decoded_email) {
+        return res.status(401).send({ error: "You are not authorized" });
       }
-      const cursor = paymentCollection.find(query).sort({ paidAt: -1 });
-      const result = await cursor.toArray();
-      res.send(result);
+
+      const payments = await paymentCollection
+        .find(email ? { senderEmail: email } : {})
+        .sort({ paidAt: -1 })
+        .toArray();
+
+      res.send(payments);
     });
 
-    // Riders related apis
+    // -------------------------------
+    // 🏍️ RIDERS API
+    // -------------------------------
+
+    // Get all riders + filters
     app.get("/riders", async (req, res) => {
       const { status, district, workStatus } = req.query;
       const query = {};
 
-      if (status) {
-        query.status = status;
-      }
-      if (district) {
-        query.district = district;
-      }
-      if (workStatus) {
-        query.workStatus = workStatus;
-      }
+      if (status) query.status = status;
+      if (district) query.district = district;
+      if (workStatus) query.workStatus = workStatus;
 
-      const cursor = ridersCollection.find(query);
-      const result = await cursor.toArray();
-      res.send(result);
+      const riders = await ridersCollection.find(query).toArray();
+      res.send(riders);
     });
 
+    // New rider request
     app.post("/riders", async (req, res) => {
       const rider = req.body;
       rider.status = "pending";
       rider.createdAt = new Date();
+
       const result = await ridersCollection.insertOne(rider);
       res.send(result);
     });
 
-    app.patch("/riders/:id", verifyFBToken, async (req, res) => {
+    // Approve/Reject rider + assign role
+    app.patch("/riders/:id", verifyFBToken, verifyAdmin, async (req, res) => {
       const status = req.body.status;
       const id = req.params.id;
-      const query = { _id: new ObjectId(id) };
-      const updatedDoc = {
-        $set: {
-          status: status,
-          workStatus: "available",
-        },
-      };
 
-      const result = await ridersCollection.updateOne(query, updatedDoc);
-
-      if (status === "approved") {
-        const email = req.body.email;
-        const userQuery = { email };
-        const updateUser = {
+      const result = await ridersCollection.updateOne(
+        { _id: new ObjectId(id) },
+        {
           $set: {
-            role: "rider",
+            status: status,
+            workStatus: "available",
           },
-        };
-        const userResult = await userCollection.updateOne(
-          userQuery,
-          updateUser
+        }
+      );
+
+      // Convert user → rider role if approved
+      if (status === "approved") {
+        await userCollection.updateOne(
+          { email: req.body.email },
+          { $set: { role: "rider" } }
         );
       }
 
@@ -323,16 +359,22 @@ async function run() {
 
     console.log("Connected to MongoDB server successfully!");
   } finally {
-    // Ensures that the client will close when you finish/error
-    // await client.close();
+    // Client remains open for performance
   }
 }
+
 run().catch(console.dir);
 
+// -------------------------------
+// ROOT
+// -------------------------------
 app.get("/", (req, res) => {
   res.send("Zap Shift Server is running");
 });
 
+// -------------------------------
+// SERVER
+// -------------------------------
 app.listen(port, () => {
   console.log(`Zap Shift Server listening on port ${port}`);
 });
