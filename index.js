@@ -101,15 +101,15 @@ async function run() {
 
     // GET all users (Protected)
     app.get("/users", verifyFBToken, async (req, res) => {
-       const searchText = req.query.search;
+      const searchText = req.query.search;
       const query = {};
 
-      if(searchText) {
+      if (searchText) {
         // query.displayName = { $regex: searchText, $options: "i" };
         query.$or = [
           { displayName: { $regex: searchText, $options: "i" } },
           { email: { $regex: searchText, $options: "i" } },
-        ]
+        ];
       }
       const cursor = userCollection.find(query).sort({ createdAt: -1 });
       const result = await cursor.toArray();
@@ -162,8 +162,13 @@ async function run() {
 
     // Get all parcels / filter by sender email
     app.get("/parcels", async (req, res) => {
-      const { email } = req.query;
+      const { email, deliveryStatus } = req.query;
+
       const query = email ? { senderEmail: email } : {};
+
+      if (deliveryStatus) {
+        query.deliveryStatus = deliveryStatus;
+      }
 
       const parcels = await parcelCollection
         .find(query, { sort: { createdAt: -1 } })
@@ -187,6 +192,38 @@ async function run() {
 
       const result = await parcelCollection.insertOne(parcel);
       res.send(result);
+    });
+
+    // Update parcel
+    app.patch("/parcels/:id", async (req, res) => {
+      const id = req.params.id;
+      const { parcelId, riderId, riderName, riderEmail } = req.body;
+      const query = { _id: new ObjectId(id) };
+
+      const updateDoc = {
+        $set: {
+          deliveryStatus: "assigned",
+          riderId: riderId,
+          riderName: riderName,
+          riderEmail: riderEmail,
+        },
+      };
+
+      const result = await parcelCollection.updateOne(query, updateDoc);
+
+      // Update Rider Information
+      const riderQuery = { _id: new ObjectId(riderId) };
+      const riderUpdateDoc = {
+        $set: {
+          workStatus: "in_delivery",
+        },
+      };
+      const riderResult = await ridersCollection.updateOne(
+        riderQuery,
+        riderUpdateDoc
+      );
+
+      res.send(riderResult);
     });
 
     // Delete parcel
