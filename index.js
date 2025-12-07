@@ -177,10 +177,27 @@ async function run() {
       res.send(parcels);
     });
 
+    // TODO: get parcel by rider 
+    app.get('/parcels/rider', async (req, res) => {
+      const { riderEmail, deliveryStatus } = req.query;
+      const query = {}
+      
+      if(riderEmail){
+        query.riderEmail = riderEmail
+      }
+      if(deliveryStatus){
+        query.deliveryStatus = deliveryStatus
+      }
+
+      const cursor = parcelCollection.find(query)
+      const result = await cursor.toArray();
+      res.send(result);
+    });
+
     // Get parcel by ID
     app.get("/parcels/:id", async (req, res) => {
       const result = await parcelCollection.findOne({
-        _id: new ObjectId(req.params.id),
+        _id: new ObjectId(req.params._id),
       });
       res.send(result);
     });
