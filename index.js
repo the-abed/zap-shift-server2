@@ -24,7 +24,7 @@ admin.initializeApp({
 // 🔐 Tracking ID Generator
 // -------------------------------
 function generateTrackingId() {
-  const prefix = "TRK";
+  const prefix = "PRCL";
   const date = new Date().toISOString().slice(0, 10).replace(/-/g, "");
   const random = crypto.randomBytes(3).toString("hex").toUpperCase();
   return `${prefix}-${date}-${random}`;
@@ -98,14 +98,26 @@ async function run() {
       next();
     };
 
+    // -------------------------------
+    // 🔐 Verify Rider Middleware
+    const verifyRider = async (req, res, next) => {
+      const email = req.decoded_email;
+      // Implement admin check
+      const query = { email };
+      const user = await ridersCollection.findOne(query);
+      if (!user || user.role !== "rider") {
+        return res.status(403).send({ error: "You are not authorized" });
+      }
+      next();
+    };
+
     const logTracking = async (trackingId, status) => {
       const log = {
-         trackingId,
-         status,
-         details: status.split("-").join(" "),
-         createdAt: new Date(),
-
-      }
+        trackingId,
+        status,
+        details: status.split("-").join(" "),
+        createdAt: new Date(),
+      };
       const result = await trackingCollection.insertOne(log);
       return result;
     };
@@ -203,8 +215,7 @@ async function run() {
       if (deliveryStatus !== "parcel_delivered") {
         // query.deliveryStatus = {$in: [deliveryStatus, "assigned", "accepted_for_delivery"]}
         query.deliveryStatus = { $nin: ["parcel_delivered"] };
-      }
-      else {
+      } else {
         query.deliveryStatus = deliveryStatus;
       }
 
@@ -251,13 +262,34 @@ async function run() {
       res.send(result);
     });
 
+    // Get parcel by status
+    app.get("/parcels/delivery-status/stats", async (req, res) => {
+      const pipeline = [
+        {
+          $group: {
+            _id: "$deliveryStatus",
+            count: { $sum: 1 },
+          },
+        },
+        {
+          $project: {
+            _id: 0,
+            deliveryStatus: "$_id",
+            count: 1,
+          },
+        },
+      ];
+      const result = await parcelCollection.aggregate(pipeline).toArray();
+      res.send(result);
+    });
+
     // Create parcel
     app.post("/parcels", async (req, res) => {
       const parcel = req.body;
       const trackingId = generateTrackingId();
       parcel.trackingId = trackingId;
       parcel.createdAt = new Date();
-      
+
       logTracking(trackingId, "parcel_created");
 
       const result = await parcelCollection.insertOne(parcel);
@@ -370,7 +402,6 @@ async function run() {
             $set: {
               paymentStatus: "paid",
               deliveryStatus: "pending-pickup",
-              
             },
           }
         );
@@ -433,6 +464,56 @@ async function run() {
 
       const riders = await ridersCollection.find(query).toArray();
       res.send(riders);
+    });
+
+    app.get("/riders/delivery-per-day", async (req, res) => {
+      const email = req.query.email;
+      // aggregate on parcel
+      const pipeline = [
+        {
+          $match: {
+            riderEmail: email,
+            deliveryStatus: "parcel_delivered",
+          },
+        },
+        {
+          $lookup: {
+            from: "trackings",
+            localField: "trackingId",
+            foreignField: "trackingId",
+            as: "parcel_trackings",
+          },
+        },
+        {
+          $unwind: "$parcel_trackings",
+        },
+        {
+          $match: {
+            "parcel_trackings.status": "parcel_delivered",
+          },
+        },
+        {
+          // convert timestamp to YYYY-MM-DD string
+          $addFields: {
+            deliveryDay: {
+              $dateToString: {
+                format: "%Y-%m-%d",
+                date: "$parcel_trackings.createdAt",
+              },
+            },
+          },
+        },
+        {
+          // group by date
+          $group: {
+            _id: "$deliveryDay",
+            deliveredCount: { $sum: 1 },
+          },
+        },
+      ];
+
+      const result = await parcelCollection.aggregate(pipeline).toArray();
+      res.send(result);
     });
 
     // New rider request
